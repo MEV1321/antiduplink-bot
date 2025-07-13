@@ -1,5 +1,5 @@
 services:
-  - type: web
+  - type: web  # Для Web Service
     name: antiduplink-bot
     runtime: python
     pythonVersion: "3.11.9"
@@ -10,3 +10,6 @@ services:
         sync: false
       - key: REDIS_URL
         sync: false
+      - key: USE_HTTP_SERVER
+        value: "1"  # Активировать HTTP-сервер
+    port: 10000     # Порт для Web Service
