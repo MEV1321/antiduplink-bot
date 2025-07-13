@@ -11,6 +11,7 @@ from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import redis.asyncio as redis
+from aiohttp import web
 
 # Настройка логирования
 logging.basicConfig(
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 # Инициализация бота
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
+USE_HTTP_SERVER = os.getenv("USE_HTTP_SERVER", "0") == "1"  # Для Render Web Services
 
 if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN не найден! Проверьте переменные окружения.")
@@ -46,6 +48,19 @@ else:
     logger.warning("REDIS_URL не указан. Используется in-memory хранилище.")
 
 dp = Dispatcher(storage=storage)
+
+# Простой HTTP-сервер для Render Web Services
+async def web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_root)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 10000)
+    await site.start()
+    logger.info("HTTP-сервер запущен на порту 10000")
+
+async def handle_root(request):
+    return web.Response(text="Anti-Duplicate Link Bot is running")
 
 # Функции для счетчика очистки
 async def increment_cleanup_counter(chat_id: int) -> int:
@@ -107,7 +122,8 @@ async def save_link(chat_id: int, url: str, message_id: int):
     link_data = await get_link_data(chat_id, url) or {
         "message_id": message_id,
         "timestamp": datetime.now().isoformat(),
-        "likes": {}  # Словарь для хранения лайков: {user_id: username}
+        "likes": {},    # Словарь лайков
+        "thumbs_up": {} # Словарь реакций 👍
     }
     
     # Обновляем ID сообщения и время
@@ -129,8 +145,8 @@ async def get_link_data(chat_id: int, url: str) -> dict:
     data = await redis_client.hget(f"chat:{chat_id}", url)
     return json.loads(data) if data else None
 
-async def add_like(chat_id: int, url: str, user_id: int, username: str):
-    """Добавляет лайк к ссылке"""
+async def add_reaction(chat_id: int, url: str, user_id: int, username: str, reaction_type: str):
+    """Добавляет реакцию к ссылке"""
     if not redis_client:
         return False
     
@@ -138,12 +154,16 @@ async def add_like(chat_id: int, url: str, user_id: int, username: str):
     if not link_data:
         return False
     
-    # Инициализируем словарь лайков, если его нет
-    if "likes" not in link_data:
-        link_data["likes"] = {}
+    # Инициализируем словари реакций
+    for r_type in ["likes", "thumbs_up"]:
+        if r_type not in link_data:
+            link_data[r_type] = {}
     
-    # Добавляем/обновляем лайк
-    link_data["likes"][str(user_id)] = username
+    # Добавляем реакцию
+    if reaction_type == "like":
+        link_data["likes"][str(user_id)] = username
+    elif reaction_type == "thumbs_up":
+        link_data["thumbs_up"][str(user_id)] = username
     
     # Сохраняем обновленные данные
     await redis_client.hset(f"chat:{chat_id}", url, json.dumps(link_data))
@@ -186,7 +206,7 @@ async def delete_after_delay(message: types.Message, delay: int = 900):
         logger.error(f"Ошибка при удалении сообщения бота: {e}")
 
 async def generate_stats(chat_id: int) -> str:
-    """Генерирует статистику лайков для всех ссылок в чате"""
+    """Генерирует статистику реакций для всех ссылок в чате"""
     if not redis_client:
         return "Статистика недоступна: Redis не подключен."
     
@@ -198,26 +218,33 @@ async def generate_stats(chat_id: int) -> str:
     for url, data_json in all_links.items():
         try:
             data = json.loads(data_json)
-            likes = data.get("likes", {})
             
+            # Форматируем статистику
+            link_stats = []
+            
+            # Лайки
+            likes = data.get("likes", {})
             if likes:
-                # Форматируем список пользователей
-                users = []
-                for user_id, username in likes.items():
-                    if username:
-                        users.append(f"@{username}")
-                    else:
-                        users.append(f"id{user_id}")
-                
-                users_list = ", ".join(users)
-                stats.append(f"🔗 {url}\n👍 Понравилось: {users_list}\n")
+                users = [f"@{username}" if username else f"id{user_id}" 
+                         for user_id, username in likes.items()]
+                link_stats.append(f"❤️ Лайки: {len(likes)} ({', '.join(users)})")
+            
+            # Большие пальцы вверх
+            thumbs_up = data.get("thumbs_up", {})
+            if thumbs_up:
+                users = [f"@{username}" if username else f"id{user_id}" 
+                         for user_id, username in thumbs_up.items()]
+                link_stats.append(f"👍 Большие пальцы: {len(thumbs_up)} ({', '.join(users)})")
+            
+            if link_stats:
+                stats.append(f"🔗 {url}\n" + "\n".join(link_stats) + "\n")
         except Exception as e:
             logger.error(f"Ошибка при обработке статистики для {url}: {e}")
     
     if not stats:
         return "Пока никто не оценил ссылки в этом чате."
     
-    return "📊 Статистика лайков:\n\n" + "\n".join(stats)
+    return "📊 Статистика реакций:\n\n" + "\n".join(stats)
 
 # Обработчики сообщений
 @dp.message(Command("start"))
@@ -229,7 +256,7 @@ async def cmd_start(message: types.Message):
             "• Удалять сообщения\n"
             "• Видеть историю сообщений\n\n"
             "Я запоминаю все ссылки на 365 дней, даже после перезапуска!\n\n"
-            "Также я умею собирать статистику лайков по ссылкам! Просто ответь на сообщение с ссылкой словом 'нравится'.",
+            "Также я умею собирать статистику реакций по ссылкам!",
             parse_mode=ParseMode.HTML
         )
 
@@ -255,7 +282,7 @@ async def cmd_status(message: types.Message):
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
-    """Показывает статистику лайков"""
+    """Показывает статистику реакций"""
     chat_id = message.chat.id
     stats = await generate_stats(chat_id)
     await message.answer(stats, parse_mode=ParseMode.HTML)
@@ -270,27 +297,37 @@ async def check_duplicate_links(message: types.Message):
     links = extract_links(message)
     
     if not links:
-        # Обработка лайков
-        if message.reply_to_message and message.text.lower() in ["нравится", "like", "👍"]:
+        # Обработка реакций
+        if message.reply_to_message:
             replied_message = message.reply_to_message
             replied_links = extract_links(replied_message)
             
             if replied_links:
                 user_id = message.from_user.id
                 username = message.from_user.username
+                text = message.text.lower() if message.text else ""
                 
-                for link in replied_links:
-                    success = await add_like(
-                        chat_id, 
-                        link, 
-                        user_id, 
-                        username
-                    )
+                # Определяем тип реакции
+                reaction_type = None
+                if text in ["нравится", "like"]:
+                    reaction_type = "like"
+                elif "👍" in text or "thumb" in text:
+                    reaction_type = "thumbs_up"
                 
-                if success:
-                    await message.reply("✅ Ваша оценка учтена!")
-                    asyncio.create_task(delete_after_delay(message, delay=10))
-                return
+                if reaction_type:
+                    for link in replied_links:
+                        success = await add_reaction(
+                            chat_id, 
+                            link, 
+                            user_id, 
+                            username,
+                            reaction_type
+                        )
+                    
+                    if success:
+                        await message.reply("✅ Ваша реакция учтена!")
+                        asyncio.create_task(delete_after_delay(message, delay=10))
+                    return
         return
     
     # Шаг 1: Проверка на дубликаты
@@ -359,21 +396,26 @@ async def check_duplicate_links(message: types.Message):
         await cleanup_old_links(chat_id)
         logger.info(f"Запущена очистка старых ссылок в чате {chat_id}")
 
-    # Шаг 5: Добавляем кнопку "Нравится" к сообщению со ссылкой
+    # Шаг 5: Добавляем кнопки реакций к сообщению со ссылкой
     if message.chat.type != "private":
         builder = InlineKeyboardBuilder()
-        builder.button(text="👍 Нравится", callback_data=f"like_{message.message_id}")
+        builder.button(text="❤️ Нравится", callback_data=f"reaction_like_{message.message_id}")
+        builder.button(text="👍 Палец вверх", callback_data=f"reaction_thumbs_{message.message_id}")
+        builder.adjust(2)  # 2 кнопки в ряд
+        
         await message.reply(
-            "Оцените эту ссылку:",
+            "Оцените ссылку:",
             reply_markup=builder.as_markup()
         )
 
 # Обработчик нажатий на кнопки
-@dp.callback_query(F.data.startswith("like_"))
-async def handle_like_callback(callback: types.CallbackQuery):
+@dp.callback_query(F.data.startswith("reaction_"))
+async def handle_reaction_callback(callback: types.CallbackQuery):
     try:
-        # Извлекаем ID сообщения из callback_data
-        message_id = int(callback.data.split("_")[1])
+        # Извлекаем тип реакции и ID сообщения
+        parts = callback.data.split("_")
+        reaction_type = parts[1]  # like или thumbs
+        message_id = int(parts[2])
         
         # Получаем сообщение, к которому привязана кнопка
         message = await bot.get_message(
@@ -390,28 +432,48 @@ async def handle_like_callback(callback: types.CallbackQuery):
             username = callback.from_user.username
             
             for link in links:
-                await add_like(
+                await add_reaction(
                     chat_id, 
                     link, 
                     user_id, 
-                    username
+                    username,
+                    reaction_type
                 )
             
-            await callback.answer("✅ Ваша оценка учтена!")
+            # Подтверждение пользователю
+            emoji = "❤️" if reaction_type == "like" else "👍"
+            await callback.answer(f"{emoji} Ваша реакция учтена!")
             
-            # Удаляем сообщение с кнопкой
+            # Удаляем сообщение с кнопками
             await callback.message.delete()
         else:
             await callback.answer("❌ Ссылки не найдены")
     
     except Exception as e:
-        logger.error(f"Ошибка обработки лайка: {e}")
+        logger.error(f"Ошибка обработки реакции: {e}")
         await callback.answer("❌ Произошла ошибка")
 
 # Запуск бота
 async def main():
     logger.info("Starting bot...")
-    await bot.delete_webhook(drop_pending_updates=True)  # Важно для поллинга на Render
+    
+    # Проверка подключения к Redis
+    if redis_client:
+        try:
+            await redis_client.ping()
+            logger.info("Redis подключен и отвечает")
+        except Exception as e:
+            logger.error(f"Ошибка подключения к Redis: {e}")
+    
+    # Запуск HTTP-сервера при необходимости
+    if USE_HTTP_SERVER:
+        asyncio.create_task(web_server())
+    
+    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Запуск поллинга...")
+    me = await bot.get_me()
+    logger.info(f"Бот запущен: @{me.username} (ID: {me.id})")
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
