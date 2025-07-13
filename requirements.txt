@@ -1,6 +1,4 @@
 aiogram==3.3.0
 python-dotenv==1.1.1
 redis==5.0.3
-aiohttp==3.9.5
-pydantic-core==2.14.6 --only-binary=:all:
-pydantic==2.5.3 --only-binary=:all:
+aiohttp==3.12.0
