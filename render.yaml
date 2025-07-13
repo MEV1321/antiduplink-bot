@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: antiduplink-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m bot
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: REDIS_URL
+        sync: false

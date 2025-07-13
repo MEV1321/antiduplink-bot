@@ -2,14 +2,15 @@ import os
 import re
 import logging
 import random
+import asyncio
+import json
 from datetime import datetime, timedelta
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.enums import ParseMode, MessageEntityType
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
-import asyncio
+from aiogram.fsm.storage.redis import RedisStorage
 import redis.asyncio as redis
-import json
 
 # Настройка логирования
 logging.basicConfig(
@@ -27,23 +28,42 @@ if not BOT_TOKEN:
     exit(1)
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
 
 # Подключение к Redis
 redis_client = None
+storage = None
+
 if REDIS_URL:
     try:
         redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+        storage = RedisStorage(redis=redis_client)
         logger.info("✅ Подключено к Redis")
     except Exception as e:
         logger.error(f"❌ Ошибка подключения к Redis: {e}")
         redis_client = None
+        storage = None
 else:
     logger.warning("REDIS_URL не указан. Используется in-memory хранилище.")
 
-# Глобальный счетчик для оптимизации очистки
-cleanup_counter = 0
+dp = Dispatcher(storage=storage)
 
+# ========== Пункт 5: Функции для счетчика очистки ==========
+async def increment_cleanup_counter(chat_id: int) -> int:
+    """Увеличивает счетчик сообщений и возвращает текущее значение"""
+    if not redis_client:
+        return 0
+        
+    key = f"chat:{chat_id}:counter"
+    try:
+        count = await redis_client.incr(key)
+        if count >= 365:
+            await redis_client.set(key, 0)
+        return count
+    except Exception as e:
+        logger.error(f"Ошибка счетчика очистки: {e}")
+        return 0
+
+# ========== Основные функции ==========
 def normalize_url(url: str) -> str:
     """Приводим URL к единому виду для сравнения"""
     url = url.split('?')[0].split('#')[0]
@@ -140,6 +160,7 @@ async def delete_after_delay(message: types.Message, delay: int = 900):
     except Exception as e:
         logger.error(f"Ошибка при удалении сообщения бота: {e}")
 
+# ========== Обработчики сообщений ==========
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.chat.type == "private":
@@ -172,10 +193,8 @@ async def cmd_status(message: types.Message):
             parse_mode=ParseMode.HTML
         )
 
-@dp.message()
+@dp.message(F.text | F.caption)
 async def check_duplicate_links(message: types.Message):
-    global cleanup_counter
-    
     # Пропускаем служебные сообщения и самого бота
     if message.sender_chat or (message.from_user and message.from_user.id == (await bot.me()).id):
         return
@@ -246,16 +265,17 @@ async def check_duplicate_links(message: types.Message):
     
     logger.info(f"Сохранено {len(links)} ссылок в чате {chat_id}")
 
-    # Периодическая очистка старых ссылок (1 раз на 365 сообщений)
-    cleanup_counter += 1
-    if cleanup_counter >= 365:
-        asyncio.create_task(cleanup_old_links(chat_id))
-        cleanup_counter = 0
+    # Шаг 4: Периодическая очистка старых ссылок (1 раз на 365 сообщений)
+    # === Пункт 5: Используем Redis-счетчик вместо глобальной переменной ===
+    current_count = await increment_cleanup_counter(chat_id)
+    if current_count >= 365:
+        await cleanup_old_links(chat_id)
         logger.info(f"Запущена очистка старых ссылок в чате {chat_id}")
 
-# Запуск бота
+# ========== Запуск бота ==========
 async def main():
     logger.info("Starting bot...")
+    await bot.delete_webhook(drop_pending_updates=True)  # Важно для поллинга на Render
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
