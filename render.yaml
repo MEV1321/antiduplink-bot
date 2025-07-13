@@ -2,7 +2,7 @@ services:
   - type: web
     name: antiduplink-bot
     runtime: python
-    pythonVersion: "3.11.8"  # Явное указание версии
+    pythonVersion: "3.11.9"
     buildCommand: pip install -r requirements.txt
     startCommand: python -m bot
     envVars:
