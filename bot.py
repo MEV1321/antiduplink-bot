@@ -55,9 +55,14 @@ async def web_server():
     app.router.add_get('/', handle_root)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 10000)
+    
+    # Явно указываем порт и хост
+    site = web.TCPSite(runner, host='0.0.0.0', port=10000)
     await site.start()
-    logger.info("HTTP-сервер запущен на порту 10000")
+    
+    # Добавляем проверку запуска
+    logger.info(f"✅ HTTP-сервер запущен на порту 10000")
+    return site  # Возвращаем объект сервера
 
 async def handle_root(request):
     return web.Response(text="Anti-Duplicate Link Bot is running")
@@ -465,9 +470,13 @@ async def main():
         except Exception as e:
             logger.error(f"Ошибка подключения к Redis: {e}")
     
-    # Запуск HTTP-сервера при необходимости
+    # Запускаем HTTP-сервер СИНХРОННО перед ботом
+    http_server = None
     if USE_HTTP_SERVER:
-        asyncio.create_task(web_server())
+        http_server = await web_server()  # Ждем полного запуска
+    
+    # Убеждаемся, что сервер запущен
+    await asyncio.sleep(2)  # Даем время на инициализацию
     
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Запуск поллинга...")
