@@ -199,7 +199,7 @@ async def cleanup_old_links(chat_id: int):
         await redis_client.hdel(f"chat:{chat_id}", *keys_to_delete)
         logger.info(f"Удалено {len(keys_to_delete)} устаревших ссылок в чате {chat_id}")
 
-async def delete_after_delay(message: types.Message, delay: int = 900):
+async def delete_after_delay(message: types.Message, delay: int = 600):
     """Удаляет сообщение через указанную задержку (в секундах)"""
     await asyncio.sleep(delay)
     try:
@@ -382,7 +382,7 @@ async def check_duplicate_links(message: types.Message):
                 disable_web_page_preview=True
             )
             
-            # Запускаем задачу для удаления через 15 минут (900 секунд)
+            # Запускаем задачу для удаления через 15 минут (600 секунд)
             asyncio.create_task(delete_after_delay(warning_msg))
         except Exception as e:
             logger.error(f"Ошибка при отправке предупреждения: {e}")
